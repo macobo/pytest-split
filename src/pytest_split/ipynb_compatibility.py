@@ -3,10 +3,10 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from typing import List
 
-    from pytest_split.algorithms import TestGroup
+    from pytest_split.algorithms import OutputTestGroup
 
 
-def ensure_ipynb_compatibility(group: "TestGroup", items: list) -> None:
+def ensure_ipynb_compatibility(group: "OutputTestGroup", items: list) -> None:
     """
     Ensures that group doesn't contain partial IPy notebook cells.
 

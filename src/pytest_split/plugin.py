@@ -74,6 +74,14 @@ def pytest_addoption(parser: "Parser") -> None:
             "while running the suite with '--store-durations'."
         ),
     )
+    group.addoption(
+        '--group-by',
+        dest="group_by",
+        type=str,
+        help="How to group tests. By default each test is considered separately, file option groups tests in a file together. Choices: [test, file]",
+        default="test",
+        choices=["test", "file"],
+    ),
 
 
 @pytest.mark.tryfirst
@@ -164,7 +172,8 @@ class PytestSplitPlugin(Base):
         group_idx: int = config.option.group
 
         algo = algorithms.Algorithms[config.option.splitting_algorithm].value
-        groups = algo(splits, items, self.cached_durations)
+        input_test_groups = algorithms.group_tests(config.option.group_by, items, self.cached_durations)
+        groups = algo(splits, input_test_groups)
         group = groups[group_idx - 1]
 
         ensure_ipynb_compatibility(group, items)

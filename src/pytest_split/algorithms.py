@@ -1,8 +1,8 @@
 import enum
 import functools
 import heapq
-from operator import itemgetter
 from typing import TYPE_CHECKING, NamedTuple
+from collections import defaultdict
 
 if TYPE_CHECKING:
     from typing import Dict, List, Tuple
@@ -10,15 +10,20 @@ if TYPE_CHECKING:
     from _pytest import nodes
 
 
-class TestGroup(NamedTuple):
+class InputTestGroup(NamedTuple):
+    tests: "List[nodes.Item]"
+    duration: float
+
+
+class OutputTestGroup(NamedTuple):
     selected: "List[nodes.Item]"
     deselected: "List[nodes.Item]"
     duration: float
 
 
 def least_duration(
-    splits: int, items: "List[nodes.Item]", durations: "Dict[str, float]"
-) -> "List[TestGroup]":
+    splits: int, input_test_groups: "List[InputTestGroup]"
+) -> "List[OutputTestGroup]":
     """
     Split tests into groups by runtime.
     It walks the test items, starting with the test with largest duration.
@@ -34,36 +39,30 @@ def least_duration(
     :return:
         List of groups
     """
-    items_with_durations = _get_items_with_durations(items, durations)
-
-    # add index of item in list
-    items_with_durations_indexed = [
-        (*tup, i) for i, tup in enumerate(items_with_durations)
-    ]
 
     # sort in ascending order
     sorted_items_with_durations = sorted(
-        items_with_durations_indexed, key=lambda tup: tup[1], reverse=True
+        enumerate(input_test_groups), key=lambda index_and_group: index_and_group[1].duration, reverse=True
     )
 
-    selected: "List[List[Tuple[nodes.Item, int]]]" = [[] for i in range(splits)]
-    deselected: "List[List[nodes.Item]]" = [[] for i in range(splits)]
+    selected: "List[List[Tuple[InputTestGroup, int]]]" = [[] for i in range(splits)]
+    deselected: "List[List[InputTestGroup]]" = [[] for i in range(splits)]
     duration: "List[float]" = [0 for i in range(splits)]
 
     # create a heap of the form (summed_durations, group_index)
     heap: "List[Tuple[float, int]]" = [(0, i) for i in range(splits)]
     heapq.heapify(heap)
-    for item, item_duration, original_index in sorted_items_with_durations:
+    for original_index, input_test_group in sorted_items_with_durations:
         # get group with smallest sum
         summed_durations, group_idx = heapq.heappop(heap)
-        new_group_durations = summed_durations + item_duration
+        new_group_durations = summed_durations + input_test_group.duration
 
         # store assignment
-        selected[group_idx].append((item, original_index))
+        selected[group_idx].append((input_test_group, original_index))
         duration[group_idx] = new_group_durations
         for i in range(splits):
             if i != group_idx:
-                deselected[i].append(item)
+                deselected[i].append(input_test_group)
 
         # store new duration - in case of ties it sorts by the group_idx
         heapq.heappush(heap, (new_group_durations, group_idx))
@@ -73,16 +72,16 @@ def least_duration(
         # sort the items by their original index to maintain relative ordering
         # we don't care about the order of deselected items
         s = [
-            item for item, original_index in sorted(selected[i], key=lambda tup: tup[1])
+            input_test_group for input_test_group, original_index in sorted(selected[i], key=lambda tup: tup[1])
         ]
-        group = TestGroup(selected=s, deselected=deselected[i], duration=duration[i])
+        group = OutputTestGroup(selected=_flatten(s), deselected=_flatten(deselected[i]), duration=duration[i])
         groups.append(group)
     return groups
 
 
 def duration_based_chunks(
-    splits: int, items: "List[nodes.Item]", durations: "Dict[str, float]"
-) -> "List[TestGroup]":
+    splits: int, input_test_groups: "List[InputTestGroup]"
+) -> "List[OutputTestGroup]":
     """
     Split tests into groups by runtime.
     Ensures tests are split into non-overlapping groups.
@@ -92,30 +91,43 @@ def duration_based_chunks(
     :param splits: How many groups we're splitting in.
     :param items: Test items passed down by Pytest.
     :param durations: Our cached test runtimes. Assumes contains timings only of relevant tests
-    :return: List of TestGroup
+    :return: List of OutputTestGroup
     """
-    items_with_durations = _get_items_with_durations(items, durations)
-    time_per_group = sum(map(itemgetter(1), items_with_durations)) / splits
+    time_per_group = sum(group.duration for group in input_test_groups) / splits
 
-    selected: "List[List[nodes.Item]]" = [[] for i in range(splits)]
-    deselected: "List[List[nodes.Item]]" = [[] for i in range(splits)]
+    selected: "List[List[InputTestGroup]]" = [[] for i in range(splits)]
+    deselected: "List[List[InputTestGroup]]" = [[] for i in range(splits)]
     duration: "List[float]" = [0 for i in range(splits)]
 
     group_idx = 0
-    for item, item_duration in items_with_durations:
+    for group in input_test_groups:
         if duration[group_idx] >= time_per_group:
             group_idx += 1
 
-        selected[group_idx].append(item)
+        selected[group_idx].append(group)
         for i in range(splits):
             if i != group_idx:
-                deselected[i].append(item)
-        duration[group_idx] += item_duration
+                deselected[i].append(group)
+        duration[group_idx] += group.duration
 
     return [
-        TestGroup(selected=selected[i], deselected=deselected[i], duration=duration[i])
+        OutputTestGroup(selected=_flatten(selected[i]), deselected=_flatten(deselected[i]), duration=duration[i])
         for i in range(splits)
     ]
+
+def group_tests(group_type: str, items: "List[nodes.item]", durations: "Dict[str, float]") -> "List[InputTestGroup]":
+    items_with_durations = _get_items_with_durations(items, durations)
+    if group_type == "test":
+        return [InputTestGroup([item], duration) for item, duration in items_with_durations]
+    else:
+        items_by_file = defaultdict(list)
+        durations_by_file = defaultdict(int)
+        for item, duration in items_with_durations:
+            file, _ = item.nodeid.split('::')
+            items_by_file[file].append(item)
+            durations_by_file[file] += duration
+
+        return [InputTestGroup(items_by_file[file], durations_by_file[file]) for file in items_by_file.keys()]
 
 
 def _get_items_with_durations(
@@ -145,6 +157,9 @@ def _remove_irrelevant_durations(
     test_ids = [item.nodeid for item in items]
     durations = {name: durations[name] for name in test_ids if name in durations}
     return durations
+
+def _flatten(test_groups: "List[InputTestGroup]") -> "List[nodes.Item]":
+    return [item for group in test_groups for item in group.tests]
 
 
 class Algorithms(enum.Enum):
